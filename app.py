@@ -7,7 +7,7 @@ from ultralytics import YOLO
 
 st.title("♻️ Waste Detection YOLO")
 
-MODEL_DRIVE_URL = "https://drive.google.com/uc?id=1DSp9TnRA_twScvL-Ds84vrMO9iYOPfid"
+MODEL_DRIVE_URL = "https://drive.google.com/file/d/1DSp9TnRA_twScvL-Ds84vrMO9iYOPfid/view?usp=sharing"
 MODEL_PATH = "waste_model.pt"
 
 @st.cache_resource
