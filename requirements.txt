@@ -9,3 +9,5 @@ numpy
 Pillow
 av
 requests
+urllib3
+protobuf
