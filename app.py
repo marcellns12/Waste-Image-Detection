@@ -9,7 +9,7 @@ import os
 st.title("♻️ Waste Detection YOLO")
 
 # === LINK HUGGING FACE ===
-MODEL_HF_URL = "https://huggingface.co/Marcellfevaveavav/YoloV11m/resolve/main/waste_model.pt"
+MODEL_HF_URL = "https://huggingface.co/Marcellfevaveavav/YoloV11m/resolve/main/wasate_model.pt"
 MODEL_PATH = "waste_model.pt"
 
 @st.cache_resource
