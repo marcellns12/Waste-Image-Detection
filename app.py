@@ -2,75 +2,124 @@ import streamlit as st
 import cv2
 import numpy as np
 import tempfile
-import urllib.request
-from ultralytics import YOLO
 import os
+from inference_sdk import InferenceHTTPClient
 
-st.title("♻️ Waste Detection YOLO")
+# ==================================================
+# 1. KONFIGURASI HALAMAN & API
+# ==================================================
+st.set_page_config(page_title="♻️ Waste Detection API", layout="centered")
 
-# === LINK HUGGING FACE ===
-MODEL_HF_URL = "https://huggingface.co/Marcellfevaveavav/YoloV11m/blob/main/waste_model.pt"
-MODEL_PATH = "waste_model.pt"
+API_KEY = "ItgMPolGq0yMOI4nhLpe"
+MODEL_ID = "waste-project-pgzut/3"
 
-@st.cache_resource
-def download_model():
-    if not os.path.exists(MODEL_PATH):
-        try:
-            urllib.request.urlretrieve(MODEL_HF_URL, MODEL_PATH)
-            st.success("✅ Model berhasil di-download dari Hugging Face")
-        except Exception as e:
-            st.error(f"Gagal download model: {e}")
-    return MODEL_PATH
+# Inisialisasi Client Roboflow
+CLIENT = InferenceHTTPClient(
+    api_url="https://detect.roboflow.com",
+    api_key=API_KEY
+)
 
-@st.cache_resource
-def load_model():
-    path = download_model()
-    return YOLO(path)
+# ==================================================
+# 2. FUNGSI GAMBAR KOTAK (VISUALISASI)
+# ==================================================
+def draw_predictions(image, predictions):
+    """
+    Menggambar bounding box di atas gambar berdasarkan respon JSON Roboflow.
+    """
+    # Cek apakah ada prediksi
+    if 'predictions' not in predictions:
+        return image
 
-model = load_model()
+    for box in predictions['predictions']:
+        x, y, w, h = box['x'], box['y'], box['width'], box['height']
+        label = box['class']
+        conf = box['confidence']
 
-st.subheader("🟢 Pilih Mode")
-mode = st.radio("Mode Detection:", ["Realtime Webcam", "Upload Foto"])
+        # Hitung koordinat
+        x1 = int(x - w / 2)
+        y1 = int(y - h / 2)
+        x2 = int(x + w / 2)
+        y2 = int(y + h / 2)
 
-# ============================
-# REALTIME WEBCAM
-# ============================
-if mode == "Realtime Webcam":
-    st.write("Nyalakan kamera lalu arahkan sampah ke kamera.")
+        # Warna (Hijau)
+        color = (0, 255, 0) 
 
-    run = st.checkbox("Start Webcam")
-    FRAME_WINDOW = st.image([])
-    cap = None
+        # 1. Gambar Kotak
+        cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
 
-    if run:
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
-            st.error("❌ Webcam gagal dibuka. Izinkan akses kamera.")
-        else:
-            while run:
-                ret, frame = cap.read()
-                if not ret:
-                    st.error("Tidak bisa membaca frame dari kamera.")
-                    break
+        # 2. Gambar Label Background
+        text = f"{label} ({conf:.1%})"
+        (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
+        cv2.rectangle(image, (x1, y1 - 25), (x1 + text_w, y1), color, -1)
 
-                results = model.predict(frame, imgsz=640, conf=0.5)
-                annotated = results[0].plot()
-                FRAME_WINDOW.image(annotated, channels="BGR")
+        # 3. Tulis Teks
+        cv2.putText(image, text, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+    
+    return image
 
-    if cap:
-        cap.release()
+# ==================================================
+# 3. FUNGSI PROSES UTAMA
+# ==================================================
+def process_image(image_bytes):
+    """
+    Menerima bytes gambar -> Simpan Temp -> Kirim API -> Gambar Kotak -> Return RGB
+    """
+    # 1. Decode bytes ke OpenCV Image (BGR)
+    file_bytes = np.asarray(bytearray(image_bytes), dtype=np.uint8)
+    img_bgr = cv2.imdecode(file_bytes, 1)
 
-# ============================
-# UPLOAD FOTO
-# ============================
-elif mode == "Upload Foto":
-    uploaded = st.file_uploader("Upload foto", type=["jpg", "jpeg", "png"])
-    if uploaded:
-        temp = tempfile.NamedTemporaryFile(delete=False)
-        temp.write(uploaded.read())
-        temp_path = temp.name
+    # 2. Simpan ke file temporary (Wajib karena SDK butuh path file)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_file:
+        temp_path = temp_file.name
+        cv2.imwrite(temp_path, img_bgr)
 
-        img = cv2.imread(temp_path)
-        results = model.predict(img, imgsz=640, conf=0.5)
-        annotated = results[0].plot()
-        st.image(annotated, channels="BGR", caption="Hasil Deteksi")
+    try:
+        # 3. Kirim ke Roboflow API
+        with st.spinner('Sedang mengirim ke server Roboflow...'):
+            result = CLIENT.infer(temp_path, model_id=MODEL_ID)
+        
+        # 4. Gambar hasil ke foto
+        annotated_bgr = draw_predictions(img_bgr, result)
+
+        # 5. Convert ke RGB untuk Streamlit
+        return cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB), result
+
+    except Exception as e:
+        st.error(f"Error API: {e}")
+        return None, None
+    finally:
+        # Hapus file sampah
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+# ==================================================
+# 4. UI STREAMLIT
+# ==================================================
+st.title("♻️ Waste Detection (Roboflow Cloud)")
+st.markdown(f"Menggunakan Model ID: `{MODEL_ID}`")
+
+# Tab Pilihan
+tab1, tab2 = st.tabs(["🖼️ Upload Foto", "📷 Ambil Foto (Webcam)"])
+
+# --- TAB 1: UPLOAD ---
+with tab1:
+    uploaded_file = st.file_uploader("Upload foto sampah (JPG/PNG)", type=["jpg", "png", "jpeg"])
+    if uploaded_file:
+        if st.button("🔍 Deteksi File Ini"):
+            final_img, json_res = process_image(uploaded_file.read())
+            if final_img is not None:
+                st.image(final_img, caption="Hasil Deteksi", use_column_width=True)
+                # Opsional: Tampilkan data mentah
+                with st.expander("Lihat Data JSON"):
+                    st.json(json_res)
+
+# --- TAB 2: WEBCAM SNAPSHOT ---
+with tab2:
+    st.info("Klik tombol 'Take Photo' di bawah untuk mengambil gambar.")
+    
+    # st.camera_input jauh lebih stabil daripada webrtc_streamer untuk kasus API
+    camera_file = st.camera_input("Kamera")
+    
+    if camera_file is not None:
+        # Langsung proses otomatis setelah foto diambil
+        final_img, json_res = process_image(camera_file.
