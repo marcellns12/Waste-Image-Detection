@@ -8,125 +8,132 @@ from ultralytics import YOLO
 # ==================================================
 # 1. KONFIGURASI HALAMAN
 # ==================================================
-st.set_page_config(page_title="♻️ Waste Detection (Drive Model)", layout="centered")
+st.set_page_config(page_title="♻️ Waste Detection App", layout="centered")
 
-# ID File Google Drive Kamu
-# Link asli: https://drive.google.com/file/d/1DSp9TnRA_twScvL-Ds84vrMO9iYOPfid/view
+# ID File Google Drive & Nama File
 DRIVE_FILE_ID = '1DSp9TnRA_twScvL-Ds84vrMO9iYOPfid'
-MODEL_FILENAME = 'waste_model.pt'
+MODEL_FILENAME = 'my_waste_model.pt'
 
 # ==================================================
-# 2. FUNGSI DOWNLOAD & LOAD MODEL
+# 2. LOAD MODEL (Otomatis Download)
 # ==================================================
 @st.cache_resource
 def load_model():
-    """
-    Mendownload model dari Google Drive jika belum ada, lalu me-load ke memori.
-    Menggunakan cache agar tidak download ulang setiap refresh.
-    """
-    # 1. Cek apakah file model sudah ada
+    # Cek apakah file sudah ada, jika belum download dari Drive
     if not os.path.exists(MODEL_FILENAME):
-        with st.spinner(f"Sedang mendownload model dari Google Drive... (Harap tunggu)"):
+        with st.spinner("Sedang mendownload model dari Google Drive..."):
             try:
-                # URL download gdown
                 url = f'https://drive.google.com/uc?id={DRIVE_FILE_ID}'
                 gdown.download(url, MODEL_FILENAME, quiet=False)
-                st.success("Download model berhasil!")
             except Exception as e:
                 st.error(f"Gagal mendownload model: {e}")
                 return None
 
-    # 2. Load Model YOLO
+    # Load Model YOLO
     try:
         model = YOLO(MODEL_FILENAME)
         return model
     except Exception as e:
-        st.error(f"Gagal memuat model YOLO: {e}")
+        st.error(f"File model rusak atau tidak kompatibel: {e}")
         return None
 
-# Load model di awal
 model = load_model()
 
 # ==================================================
-# 3. SETTING SENSITIVITAS
+# 3. SIDEBAR (Hanya Slider Threshold)
 # ==================================================
 st.sidebar.header("⚙️ Pengaturan")
-# Slider Confidence
-CONF_THRESHOLD = st.sidebar.slider("Confidence Threshold (Keyakinan)", 0.0, 1.0, 0.40, 0.05)
+
+# Slider untuk memfilter hasil yang kurang yakin
+# Default 0.50 (50%). Jika di bawah ini, objek tidak akan ditampilkan.
+CONF_THRESHOLD = st.sidebar.slider("Akurasi Minimum (Threshold)", 0.0, 1.0, 0.50, 0.05)
 
 # ==================================================
-# 4. FUNGSI DETEKSI (LOKAL)
+# 4. FUNGSI DETEKSI (PROCESS IMAGE)
 # ==================================================
 def process_image(image_bytes):
-    """
-    Menerima bytes gambar -> Prediksi Lokal (YOLO) -> Return Gambar Hasil
-    """
-    if model is None:
-        st.error("Model belum dimuat.")
-        return None, None
+    if model is None: return None, []
 
     try:
-        # 1. Decode gambar ke OpenCV
+        # 1. Baca data gambar (Decode)
         file_bytes = np.asarray(bytearray(image_bytes), dtype=np.uint8)
         img_bgr = cv2.imdecode(file_bytes, 1)
 
         if img_bgr is None:
-            return None, None
+            return None, []
 
-        # 2. Prediksi menggunakan Model Lokal
-        # conf=... mengatur batas keyakinan agar tidak asal tebak
-        results = model.predict(img_bgr, conf=CONF_THRESHOLD)
-        
-        # 3. Ambil gambar hasil plotting (sudah ada kotaknya)
-        # results[0].plot() mengembalikan array BGR
-        annotated_img = results[0].plot()
+        # 2. Convert BGR ke RGB (PENTING: Agar warna tidak tertukar)
+        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
-        # 4. Convert BGR ke RGB untuk Streamlit
-        final_img = cv2.cvtColor(annotated_img, cv2.COLOR_BGR2RGB)
+        # 3. Prediksi menggunakan YOLO
+        results = model.predict(img_rgb, conf=CONF_THRESHOLD)
         
-        # Hitung jumlah objek
-        count = len(results[0].boxes)
+        # 4. Gambar Kotak (Plotting)
+        # results[0].plot() mengembalikan format BGR
+        annotated_bgr = results[0].plot()
         
-        # Ambil nama class yang terdeteksi untuk info
-        detected_classes = [model.names[int(c)] for c in results[0].boxes.cls]
+        # 5. Convert hasil plot ke RGB untuk ditampilkan
+        final_img = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
+        
+        # Ambil nama kelas yang terdeteksi untuk laporan teks
+        detected_classes = []
+        for box in results[0].boxes:
+            class_id = int(box.cls[0])
+            conf = float(box.conf[0])
+            class_name = model.names[class_id]
+            # Format teks: "B3 (85%)"
+            detected_classes.append(f"{class_name} ({conf:.0%})")
         
         return final_img, detected_classes
 
     except Exception as e:
-        st.error(f"Error proses deteksi: {e}")
-        return None, None
+        st.error(f"Terjadi kesalahan saat memproses gambar: {e}")
+        return None, []
 
 # ==================================================
-# 5. UI UTAMA
+# 5. TAMPILAN UTAMA (UI)
 # ==================================================
-st.title("♻️ Waste Detection (Local Model)")
-st.markdown("Model didownload langsung dari Google Drive dan dijalankan di server ini.")
+st.title("♻️ Waste Detection App")
+st.markdown("Aplikasi deteksi sampah (Model Lokal).")
 
 if model is None:
-    st.warning("⚠️ Model gagal dimuat. Pastikan File ID Google Drive benar dan bisa diakses publik.")
+    st.warning("⚠️ Model gagal dimuat. Coba refresh halaman.")
     st.stop()
 
-# Tabs
+# Membuat Tab
 tab1, tab2 = st.tabs(["📸 Kamera", "🖼️ Upload File"])
 
 # --- TAB 1: KAMERA ---
 with tab1:
-    st.info("Ambil foto untuk mendeteksi.")
-    camera_file = st.camera_input("Kamera", key="cam")
+    st.info("Pastikan cahaya cukup agar deteksi akurat.")
+    camera_file = st.camera_input("Ambil Foto", key="cam_input")
     
     if camera_file:
         final_img, classes = process_image(camera_file.getvalue())
+        
         if final_img is not None:
-            st.success(f"Terdeteksi: {', '.join(set(classes))} ({len(classes)} objek)")
-            st.image(final_img, use_column_width=True)
+            if not classes:
+                st.warning("⚠️ Objek tidak terdeteksi. Coba dekatkan objek atau turunkan Threshold di sidebar.")
+                st.image(final_img, caption="Gambar Asli", use_column_width=True)
+            else:
+                # Tampilkan hasil unik (set) agar tidak spam nama yang sama
+                unique_classes = list(set([x.split(' (')[0] for x in classes])) 
+                st.success(f"Terdeteksi: {', '.join(unique_classes)}")
+                st.image(final_img, caption="Hasil Deteksi", use_column_width=True)
 
 # --- TAB 2: UPLOAD ---
 with tab2:
-    uploaded_file = st.file_uploader("Upload Foto", type=['jpg', 'png', 'jpeg'])
+    uploaded = st.file_uploader("Upload foto (JPG/PNG)", type=['jpg', 'png', 'jpeg'])
     
-    if uploaded_file:
-        if st.button("🔍 Deteksi"):
-            final_img, classes = process_image(uploaded_file.read())
+    if uploaded:
+        if st.button("🔍 Mulai Deteksi"):
+            final_img, classes = process_image(uploaded.read())
+            
             if final_img is not None:
-                st.success(f"Terdeteksi: {', '.join(set(classes))} ({len(classes)} objek)")
-                st.image(final_img, use_column_width=True)
+                if not classes:
+                    st.warning("⚠️ Objek tidak terdeteksi.")
+                    st.image(final_img, caption="Gambar Asli", use_column_width=True)
+                else:
+                    unique_classes = list(set([x.split(' (')[0] for x in classes]))
+                    st.success(f"Terdeteksi: {', '.join(unique_classes)}")
+                    st.image(final_img, caption="Hasil Deteksi", use_column_width=True)
