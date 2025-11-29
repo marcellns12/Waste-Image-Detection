@@ -7,7 +7,7 @@ from inference_sdk import InferenceHTTPClient
 # ==================================================
 # 1. KONFIGURASI
 # ==================================================
-st.set_page_config(page_title="♻️ Waste Detection Fixed", layout="centered")
+st.set_page_config(page_title="♻️ Waste Detection Final", layout="centered")
 
 API_KEY = "ItgMPolGq0yMOI4nhLpe"
 MODEL_ID = "waste-project-pgzut/3"
@@ -20,15 +20,15 @@ CLIENT = InferenceHTTPClient(
 # ==================================================
 # 2. SETUP WARNA (CUSTOM COLOR)
 # ==================================================
-# A. ANORGANIK = KUNING
+# ANORGANIK = KUNING
 annotator_anorganik_box = sv.BoxAnnotator(color=sv.Color.YELLOW, thickness=4)
 annotator_anorganik_label = sv.LabelAnnotator(color=sv.Color.YELLOW, text_scale=0.8, text_thickness=2)
 
-# B. ORGANIK = HIJAU
+# ORGANIK = HIJAU
 annotator_organik_box = sv.BoxAnnotator(color=sv.Color.GREEN, thickness=4)
 annotator_organik_label = sv.LabelAnnotator(color=sv.Color.GREEN, text_scale=0.8, text_thickness=2)
 
-# C. B3 = MERAH
+# B3 = MERAH
 annotator_b3_box = sv.BoxAnnotator(color=sv.Color.RED, thickness=4)
 annotator_b3_label = sv.LabelAnnotator(color=sv.Color.RED, text_scale=0.8, text_thickness=2)
 
@@ -47,19 +47,29 @@ def process_image(image_buffer):
              return None, 0
 
         # 2. Kirim ke API Roboflow
-        # [PERBAIKAN] Hapus parameter 'confidence' di sini karena bikin error
         with st.spinner("Menganalisis jenis sampah..."):
             result = CLIENT.infer(img_bgr, model_id=MODEL_ID)
 
         # 3. Konversi ke Supervision
         detections = sv.Detections.from_inference(result)
 
-        # [PERBAIKAN] Filter Confidence dilakukan DI SINI
-        # Hanya ambil yang keyakinannya > 30% (0.3)
-        detections = detections[detections.confidence > 0.3]
+        # ---------------------------------------------------------
+        # [FIX ERROR DISINI]
+        # Cek dulu apakah ada deteksi. Kalau kosong, langsung return.
+        if len(detections) == 0:
+            return cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB), 0
+        
+        # Paksa confidence menjadi Numpy Array agar tidak error "valid indices"
+        # Filter hanya yang keyakinannya > 30% (0.3)
+        valid_idx = np.array(detections.confidence) > 0.3
+        detections = detections[valid_idx]
+        
+        # Cek lagi setelah difilter, kalau jadi kosong, return gambar asli
+        if len(detections) == 0:
+            return cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB), 0
+        # ---------------------------------------------------------
 
         # 4. FILTERING & PEWARNAAN
-        # Kita copy gambar asli biar tidak rusak saat ditimpa warna
         annotated_image = img_bgr.copy()
 
         # --- A. Warnai ANORGANIK (Kuning) ---
@@ -96,7 +106,10 @@ def process_image(image_buffer):
         return cv2.cvtColor(annotated_image, cv2.COLOR_BGR2RGB), len(detections)
 
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Error Detil: {e}")
+        # Jika error, return gambar asli tanpa bounding box
+        if 'img_bgr' in locals() and img_bgr is not None:
+             return cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB), 0
         return None, 0
 
 # ==================================================
@@ -106,7 +119,7 @@ st.title("♻️ Smart Waste Detection")
 st.write("🔴 **B3** | 🟡 **Anorganik** | 🟢 **Organik**")
 
 # Kamera Input
-camera_file = st.camera_input("Ambil Foto", key="cam_final", label_visibility="collapsed")
+camera_file = st.camera_input("Ambil Foto", key="cam_final_fix", label_visibility="collapsed")
 
 if camera_file is not None:
     final_img, count = process_image(camera_file)
