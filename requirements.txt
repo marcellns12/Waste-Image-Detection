@@ -1,15 +1,4 @@
 streamlit
-streamlit-webrtc
-ultralytics
-gdown
+inference-sdk
 opencv-python-headless
-torch
-torchvision
 numpy
-Pillow
-av
-requests
-urllib3
-protobuf
-seaborn
-opencv-python
