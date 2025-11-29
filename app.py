@@ -1,108 +1,85 @@
-import streamlit as st
 import cv2
-import tempfile
-import gdown
+import torch
+import numpy as np
+import urllib.request
 import os
-from ultralytics import YOLO
 
-st.set_page_config(page_title="Waste Detection", layout="wide")
-
-# ----------------------------------------------------
-# GOOGLE DRIVE MODEL DOWNLOAD
-# ----------------------------------------------------
-DRIVE_URL = "https://drive.google.com/file/d/1DSp9TnRA_twScvL-Ds84vrMO9iYOPfid/view?usp=sharing"
+MODEL_DRIVE_URL = "https://drive.google.com/uc?id=1DSp9TnRA_twScvL-Ds84vrMO9iYOPfid"
 MODEL_PATH = "waste_model.pt"
 
-
-@st.cache_resource
-def download_and_load_model():
-    # Download model from Google Drive if missing
+# ----------------------------
+# Download model if not exists
+# ----------------------------
+def download_model():
     if not os.path.exists(MODEL_PATH):
-        st.warning("Downloading model from Google Drive… please wait…")
-        gdown.download(DRIVE_URL, MODEL_PATH, quiet=False, fuzzy=True)
+        print("⏳ Downloading model from Google Drive...")
+        urllib.request.urlretrieve(MODEL_DRIVE_URL, MODEL_PATH)
+        print("✅ Model downloaded!")
 
-    # Load YOLO model
-    model = YOLO(MODEL_PATH)
+# ----------------------------
+# Load YOLO model
+# ----------------------------
+def load_model():
+    print("🔄 Loading model...")
+    model = torch.hub.load("ultralytics/yolov5", "custom", path=MODEL_PATH, force_reload=True)
+    print("✅ Model loaded successfully!")
     return model
 
-
-model = download_and_load_model()
-
-
-# ----------------------------------------------------
-# COLOR MAPPING
-# ----------------------------------------------------
-COLORS = {
-    "plastic": (0, 255, 0),
-    "paper": (255, 0, 0),
-    "metal": (0, 0, 255),
-    "glass": (255, 255, 0),
-    "organic": (0, 255, 255),
-    "other": (255, 0, 255),
-}
-
-
+# ----------------------------
+# Draw boxes
+# ----------------------------
 def draw_boxes(frame, results):
-    for r in results:
-        for box in r.boxes:
-            cls = int(box.cls[0])
-            name = r.names[cls]
-            color = COLORS.get(name, (255, 255, 255))
+    for *box, conf, cls in results:
+        x1, y1, x2, y2 = map(int, box)
+        label = f"{model.names[int(cls)]} {conf:.2f}"
 
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            conf = float(box.conf[0])
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0,255,0), 2)
+        cv2.putText(frame, label, (x1, y1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
 
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(
-                frame,
-                f"{name} {conf:.2f}",
-                (x1, y1 - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                color,
-                2,
-            )
-    return frame
+# ----------------------------
+# Main detection loop
+# ----------------------------
+if __name__ == "__main__":
 
+    print("♻️ Waste Detection with YOLO")
+    print("Letakkan sampah di depan kamera — deteksi realtime aktif.")
+    print()
 
-# ----------------------------------------------------
-# UI
-# ----------------------------------------------------
-st.title("♻️ Waste Detection with YOLO")
-st.write("Letakkan sampah di depan kamera — model akan mendeteksi secara realtime.")
+    download_model()
+    model = load_model()
 
+    # OPEN CAMERA
+    cam = cv2.VideoCapture(0)
 
-# ----------------------------------------------------
-# Live Webcam
-# ----------------------------------------------------
-run_webcam = st.checkbox("Aktifkan Webcam")
+    if not cam.isOpened():
+        print("❌ Gagal membuka webcam!")
+        print("➡️ Berikan izin kamera terlebih dahulu di OS/browser.")
+        exit()
 
-if run_webcam:
-    stframe = st.empty()
+    print("✅ Webcam berhasil dibuka — mulai deteksi...")
 
-    cap = cv2.VideoCapture(0)  # 0 = default webcam
+    while True:
+        ret, frame = cam.read()
 
-    if not cap.isOpened():
-        st.error("Gagal membuka webcam! Berikan izin kamera terlebih dahulu.")
-    else:
-        st.success("Webcam aktif! Arahkan sampah ke kamera 👇")
-
-    while run_webcam:
-        ret, frame = cap.read()
         if not ret:
-            st.error("Tidak bisa membaca frame dari kamera.")
+            print("❌ Tidak bisa membaca frame dari kamera.")
             break
 
-        # YOLO inference
+        # YOLO detect
         results = model(frame)
+        detections = results.xyxy[0].numpy()
 
-        # Draw bounding boxes
-        frame = draw_boxes(frame, results)
+        # Draw boxes
+        if len(detections) > 0:
+            draw_boxes(frame, detections)
 
-        # BGR → RGB
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        cv2.imshow("Waste Detection", frame)
 
-        # Display
-        stframe.image(frame, channels="RGB")
+        # stop = tekan q
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            print("🛑 Deteksi dihentikan.")
+            break
 
-    cap.release()
+    cam.release()
+    cv2.destroyAllWindows()
