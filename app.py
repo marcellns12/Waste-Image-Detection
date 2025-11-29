@@ -3,94 +3,118 @@ import cv2
 import numpy as np
 import supervision as sv
 from inference_sdk import InferenceHTTPClient
-from PIL import Image
 
 # ==================================================
 # 1. KONFIGURASI
 # ==================================================
-st.set_page_config(page_title="♻️ Waste Detection Stabil", layout="centered")
+st.set_page_config(page_title="♻️ Waste Detection Custom Color", layout="centered")
 
 API_KEY = "ItgMPolGq0yMOI4nhLpe"
 MODEL_ID = "waste-project-pgzut/3"
 
-# Inisialisasi Client
 CLIENT = InferenceHTTPClient(
     api_url="https://detect.roboflow.com",
     api_key=API_KEY
 )
 
-# Setup Annotator (Supaya kotak hasilnya rapi & bagus)
-box_annotator = sv.BoxAnnotator(thickness=3)
-label_annotator = sv.LabelAnnotator(text_scale=0.6, text_thickness=2, text_padding=10)
+# ==================================================
+# 2. SETUP WARNA (CUSTOM COLOR)
+# ==================================================
+# Kita buat 3 Annotator berbeda untuk masing-masing warna
+
+# A. ANORGANIK = KUNING
+annotator_anorganik_box = sv.BoxAnnotator(color=sv.Color.YELLOW, thickness=4)
+annotator_anorganik_label = sv.LabelAnnotator(color=sv.Color.YELLOW, text_scale=0.8, text_thickness=2)
+
+# B. ORGANIK = HIJAU
+annotator_organik_box = sv.BoxAnnotator(color=sv.Color.GREEN, thickness=4)
+annotator_organik_label = sv.LabelAnnotator(color=sv.Color.GREEN, text_scale=0.8, text_thickness=2)
+
+# C. B3 = MERAH
+annotator_b3_box = sv.BoxAnnotator(color=sv.Color.RED, thickness=4)
+annotator_b3_label = sv.LabelAnnotator(color=sv.Color.RED, text_scale=0.8, text_thickness=2)
+
 
 # ==================================================
-# 2. FUNGSI LOGIKA (DENGAN RESIZE)
+# 3. FUNGSI LOGIKA DETEKSI
 # ==================================================
 def process_image(image_buffer):
     try:
-        # 1. Baca gambar dari buffer kamera
-        file_bytes = np.asarray(bytearray(image_buffer.read()), dtype=np.uint8)
+        # 1. Baca gambar
+        file_bytes = np.asarray(bytearray(image_buffer.getvalue()), dtype=np.uint8)
         img_bgr = cv2.imdecode(file_bytes, 1)
 
-        # 2. [PENTING] Resize Gambar biar Internet Gak Berat
-        # Kita kecilkan ke lebar 640px. Kualitas tetap bagus, tapi size file turun 80%.
-        # Ini kunci agar tidak "Error Connection" ke API.
-        height, width = img_bgr.shape[:2]
-        new_width = 640
-        new_height = int((new_width / width) * height)
-        img_resized = cv2.resize(img_bgr, (new_width, new_height))
+        if img_bgr is None:
+             st.error("Gambar tidak terbaca.")
+             return None, 0
 
-        # 3. Kirim ke Roboflow API
-        with st.spinner("Mengidentifikasi jenis sampah..."):
-            result = CLIENT.infer(img_resized, model_id=MODEL_ID)
+        # 2. Kirim ke API Roboflow
+        # confidence=30 artinya deteksi minimal keyakinan 30%
+        with st.spinner("Menganalisis jenis sampah..."):
+            result = CLIENT.infer(img_bgr, model_id=MODEL_ID, confidence=30)
 
-        # 4. Konversi Hasil ke Format Supervision
+        # 3. Konversi ke Supervision
         detections = sv.Detections.from_inference(result)
 
-        # 5. Filter Sampah yang "Tidak Yakin" (Threshold)
-        # Hilangkan deteksi yang keyakinannya di bawah 40% (0.4) biar gak asal tebak B3
-        detections = detections[detections.confidence > 0.4]
+        # 4. FILTERING & PEWARNAAN
+        # Kita copy gambar asli biar tidak rusak saat ditimpa warna
+        annotated_image = img_bgr.copy()
 
-        # 6. Gambar Kotak & Label
-        annotated_image = box_annotator.annotate(scene=img_resized.copy(), detections=detections)
-        annotated_image = label_annotator.annotate(scene=annotated_image, detections=detections)
+        # --- A. Warnai ANORGANIK (Kuning) ---
+        # Cari deteksi yang nama kelasnya mengandung "anorganik" (huruf kecil/besar bebas)
+        mask_anorganik = np.array([
+            "anorganik" in data["class_name"].lower() 
+            for data in detections.data.values()
+        ])
+        # Jika ada yang cocok, gambar kotak kuning
+        if mask_anorganik.any():
+            det_anorganik = detections[mask_anorganik] # Ambil cuma yang anorganik
+            annotated_image = annotator_anorganik_box.annotate(scene=annotated_image, detections=det_anorganik)
+            annotated_image = annotator_anorganik_label.annotate(scene=annotated_image, detections=det_anorganik)
 
-        # 7. Return Hasil (Convert ke RGB buat Streamlit)
+        # --- B. Warnai ORGANIK (Hijau) ---
+        mask_organik = np.array([
+            "organik" in data["class_name"].lower() and "anorganik" not in data["class_name"].lower()
+            for data in detections.data.values()
+        ])
+        if mask_organik.any():
+            det_organik = detections[mask_organik]
+            annotated_image = annotator_organik_box.annotate(scene=annotated_image, detections=det_organik)
+            annotated_image = annotator_organik_label.annotate(scene=annotated_image, detections=det_organik)
+
+        # --- C. Warnai B3 (Merah) ---
+        mask_b3 = np.array([
+            "b3" in data["class_name"].lower() 
+            for data in detections.data.values()
+        ])
+        if mask_b3.any():
+            det_b3 = detections[mask_b3]
+            annotated_image = annotator_b3_box.annotate(scene=annotated_image, detections=det_b3)
+            annotated_image = annotator_b3_label.annotate(scene=annotated_image, detections=det_b3)
+
+        # 5. Return Hasil (Convert BGR -> RGB)
         return cv2.cvtColor(annotated_image, cv2.COLOR_BGR2RGB), len(detections)
 
     except Exception as e:
-        st.error(f"Terjadi kesalahan: {e}")
+        st.error(f"Error: {e}")
         return None, 0
 
 # ==================================================
-# 3. TAMPILAN UTAMA
+# 4. TAMPILAN UTAMA
 # ==================================================
-st.title("♻️ Waste Detection (Mode Stabil)")
-st.markdown("Mode ini lebih cepat dan **anti-error** koneksi.")
+st.title("♻️ Smart Waste Detection")
+st.write("🔴 **B3** | 🟡 **Anorganik** | 🟢 **Organik**")
 
-col1, col2 = st.columns(2)
+# Kamera Input
+camera_file = st.camera_input("Ambil Foto", key="cam_custom", label_visibility="collapsed")
 
-# --- KOLOM 1: KAMERA ---
-with col1:
-    st.write("📷 **Ambil Foto**")
-    # Camera Input (Native Streamlit) - Sangat Stabil
-    camera_file = st.camera_input("Klik tombol untuk mendeteksi", label_visibility="collapsed")
-
-# --- KOLOM 2: HASIL ---
-with col2:
-    st.write("🤖 **Hasil Deteksi**")
+if camera_file is not None:
+    final_img, count = process_image(camera_file)
     
-    if camera_file is not None:
-        # Proses gambar segera setelah dijepret
-        final_img, count = process_image(camera_file)
+    if final_img is not None:
+        st.image(final_img, caption="Hasil Deteksi Berwarna", use_column_width=True)
         
-        if final_img is not None:
-            st.image(final_img, use_column_width=True)
-            
-            if count > 0:
-                st.success(f"Berhasil mendeteksi {count} objek!")
-            else:
-                st.warning("Tidak ada objek terdeteksi. Coba dekatkan kamera.")
-    else:
-        # Placeholder jika belum ada foto
-        st.info("Hasil akan muncul di sini setelah Anda mengambil foto.")
+        if count > 0:
+            st.success(f"✅ Selesai! Terdeteksi {count} objek.")
+        else:
+            st.warning("⚠️ Tidak ada objek terdeteksi.")
