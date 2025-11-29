@@ -1,5 +1,7 @@
 streamlit
-ultralytics
+streamlit-webrtc
+inference-sdk
+supervision
 opencv-python-headless
 numpy
-gdown
+av
