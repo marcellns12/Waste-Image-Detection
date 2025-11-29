@@ -11,3 +11,5 @@ av
 requests
 urllib3
 protobuf
+seaborn
+opencv-python
