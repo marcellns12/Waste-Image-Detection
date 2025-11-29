@@ -1,5 +1,5 @@
 streamlit
-inference-sdk
+ultralytics
 opencv-python-headless
 numpy
-pillow
+gdown
