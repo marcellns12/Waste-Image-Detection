@@ -1,116 +1,78 @@
 import streamlit as st
+import torch
+import requests
 from ultralytics import YOLO
+from PIL import Image
 import cv2
 import numpy as np
-from PIL import Image
-import base64
-import io
+import os
 
-st.set_page_config(page_title="Waste Detection Mobile", layout="wide")
+MODEL_DRIVE_URL = "https://drive.google.com/uc?id=1DSp9TnRA_twScvL-Ds84vrMO9iYOPfid"
+MODEL_PATH = "best_saved.pt"
 
+# ----------------------------------------------------------
+# DOWNLOAD MODEL JIKA BELUM ADA
+# ----------------------------------------------------------
+def download_model():
+    if not os.path.exists(MODEL_PATH):
+        st.warning("Downloading model from Google Drive... Please wait.")
+        r = requests.get(MODEL_DRIVE_URL, allow_redirects=True)
+        open(MODEL_PATH, "wb").write(r.content)
+        st.success("Model downloaded successfully!")
 
-# ===========================================
-# LOAD MODEL
-# ===========================================
+# ----------------------------------------------------------
+# LOAD MODEL STREAMLIT CACHE
+# ----------------------------------------------------------
 @st.cache_resource
 def load_model():
-    model_path = "yolo11_best_weights.pt"  # Ganti sesuai filenya
-    return YOLO(model_path)
+    download_model()
+    return YOLO(MODEL_PATH)
 
 model = load_model()
 
+st.title("♻️ Waste Object Detection – YOLO Realtime")
 
-# ===========================================
-# KATEGORI + WARNA
-# ===========================================
-CATEGORY_COLOR = {
-    "organic": (0, 255, 0),       # hijau
-    "anorganic": (0, 255, 255),   # kuning
-    "b3": (0, 0, 255)             # merah
-}
+# ==========================================================
+# MODE PILIHAN: WEBCAM / UPLOAD
+# ==========================================================
+mode = st.selectbox("Pilih mode:", ["Upload Foto", "Realtime Webcam"])
 
-def get_color(lbl):
-    return CATEGORY_COLOR.get(lbl.lower(), (255, 255, 255))
+# ==========================================================
+# MODE UPLOAD FOTO
+# ==========================================================
+if mode == "Upload Foto":
+    uploaded = st.file_uploader("Upload gambar sampah:", type=["jpg", "png", "jpeg"])
 
+    if uploaded:
+        img = Image.open(uploaded)
+        st.image(img, caption="Gambar asli", use_column_width=True)
 
-# ===========================================
-# DRAW BOX
-# ===========================================
-def draw_boxes(image, results):
-    img = np.array(image)
+        results = model(img)
 
-    for r in results:
-        for box in r.boxes:
-            x1, y1, x2, y2 = box.xyxy[0].tolist()
-            cls = int(box.cls[0])
-            cls_name = r.names[cls].lower()
-            conf = float(box.conf[0])
+        annotated_frame = results[0].plot()
+        st.image(annotated_frame, caption="Hasil Deteksi", use_column_width=True)
 
-            color = get_color(cls_name)
+# ==========================================================
+# MODE REALTIME WEBCAM
+# ==========================================================
+elif mode == "Realtime Webcam":
+    st.write("Nyalakan webcam untuk deteksi realtime")
 
-            cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), color, 3)
-            cv2.putText(img, f"{cls_name.upper()} ({conf:.2f})",
-                        (int(x1), int(y1) - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+    run = st.checkbox("Start")
 
-    return img
+    FRAME_WINDOW = st.image([])
 
+    cap = cv2.VideoCapture(0)
 
-# ===========================================
-# UI
-# ===========================================
-st.title("📱 Waste Detection – Realtime Capture & Upload")
-st.write("Deteksi sampah **Organik (Hijau)**, **Anorganik (Kuning)**, dan **B3 (Merah)** dari kamera HP atau upload foto.")
+    while run:
+        ret, frame = cap.read()
+        if not ret:
+            st.error("Gagal membaca webcam.")
+            break
 
+        results = model(frame)
+        annotated = results[0].plot()
 
-tab1, tab2 = st.tabs(["📸 Kamera HP", "🖼️ Upload Foto"])
+        FRAME_WINDOW.image(annotated, channels="BGR")
 
-
-# ===========================================
-# TAB 1 – CAMERA CAPTURE
-# ===========================================
-with tab1:
-    st.subheader("Ambil Foto dari Kamera HP")
-
-    st.write("Klik tombol kamera di bawah untuk mengambil gambar → otomatis muncul hasilnya.")
-
-    image_data = st.file_uploader("Foto dari Kamera HP", 
-                                  type=["jpg", "jpeg", "png"],
-                                  accept_multiple_files=False,
-                                  key="camera_input",
-                                  label_visibility="collapsed")
-
-    # HTML hack agar membuka kamera HP
-    st.markdown("""
-    <input type="file" accept="image/*" capture="environment" 
-           onchange="document.querySelector('input[type=file]').dispatchEvent(new Event('input'));">
-    """, unsafe_allow_html=True)
-
-    if image_data is not None:
-        image = Image.open(image_data).convert("RGB")
-
-        st.image(image, caption="Foto Kamera", use_column_width=True)
-
-        result = model(image)
-        annotated = draw_boxes(image, result)
-
-        st.image(annotated, caption="Hasil Deteksi Sampah", use_column_width=True)
-
-
-# ===========================================
-# TAB 2 – UPLOAD FOTO MANUAL
-# ===========================================
-with tab2:
-    st.subheader("Upload Foto dari Galeri")
-
-    img_file = st.file_uploader("Upload Foto:", type=["jpg", "jpeg", "png"])
-
-    if img_file:
-        image = Image.open(img_file).convert("RGB")
-
-        st.image(image, caption="Gambar Asli", use_column_width=True)
-
-        result = model(image)
-        annotated = draw_boxes(image, result)
-
-        st.image(annotated, caption="Hasil Deteksi Sampah", use_column_width=True)
+    cap.release()
