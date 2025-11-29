@@ -1,85 +1,83 @@
+import streamlit as st
 import cv2
-import torch
 import numpy as np
+import tempfile
 import urllib.request
-import os
+from ultralytics import YOLO
+
+st.title("♻️ Waste Detection YOLO")
 
 MODEL_DRIVE_URL = "https://drive.google.com/uc?id=1DSp9TnRA_twScvL-Ds84vrMO9iYOPfid"
 MODEL_PATH = "waste_model.pt"
 
-# ----------------------------
-# Download model if not exists
-# ----------------------------
+@st.cache_resource
 def download_model():
-    if not os.path.exists(MODEL_PATH):
-        print("⏳ Downloading model from Google Drive...")
+    try:
         urllib.request.urlretrieve(MODEL_DRIVE_URL, MODEL_PATH)
-        print("✅ Model downloaded!")
+        return True
+    except Exception as e:
+        st.error(f"Gagal download model: {e}")
+        return False
 
-# ----------------------------
-# Load YOLO model
-# ----------------------------
+@st.cache_resource
 def load_model():
-    print("🔄 Loading model...")
-    model = torch.hub.load("ultralytics/yolov5", "custom", path=MODEL_PATH, force_reload=True)
-    print("✅ Model loaded successfully!")
-    return model
-
-# ----------------------------
-# Draw boxes
-# ----------------------------
-def draw_boxes(frame, results):
-    for *box, conf, cls in results:
-        x1, y1, x2, y2 = map(int, box)
-        label = f"{model.names[int(cls)]} {conf:.2f}"
-
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0,255,0), 2)
-        cv2.putText(frame, label, (x1, y1 - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
-
-# ----------------------------
-# Main detection loop
-# ----------------------------
-if __name__ == "__main__":
-
-    print("♻️ Waste Detection with YOLO")
-    print("Letakkan sampah di depan kamera — deteksi realtime aktif.")
-    print()
-
     download_model()
-    model = load_model()
+    return YOLO(MODEL_PATH)
 
-    # OPEN CAMERA
-    cam = cv2.VideoCapture(0)
+model = load_model()
 
-    if not cam.isOpened():
-        print("❌ Gagal membuka webcam!")
-        print("➡️ Berikan izin kamera terlebih dahulu di OS/browser.")
-        exit()
+st.subheader("🟢 Pilih Mode")
 
-    print("✅ Webcam berhasil dibuka — mulai deteksi...")
+mode = st.radio("Mode Detection:", ["Realtime Webcam", "Upload Foto"])
 
-    while True:
-        ret, frame = cam.read()
+# ============================
+# REALTIME WEBCAM
+# ============================
+if mode == "Realtime Webcam":
+    st.write("Nyalakan kamera lalu arahkan sampah ke kamera.")
 
-        if not ret:
-            print("❌ Tidak bisa membaca frame dari kamera.")
-            break
+    run = st.checkbox("Start Webcam")
 
-        # YOLO detect
-        results = model(frame)
-        detections = results.xyxy[0].numpy()
+    FRAME_WINDOW = st.image([])
 
-        # Draw boxes
-        if len(detections) > 0:
-            draw_boxes(frame, detections)
+    cap = None
 
-        cv2.imshow("Waste Detection", frame)
+    if run:
+        cap = cv2.VideoCapture(0)
 
-        # stop = tekan q
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            print("🛑 Deteksi dihentikan.")
-            break
+        if not cap.isOpened():
+            st.error("❌ Webcam gagal dibuka. Izinkan akses kamera.")
+        else:
+            while run:
+                ret, frame = cap.read()
+                if not ret:
+                    st.error("Tidak bisa membaca frame dari kamera.")
+                    break
 
-    cam.release()
-    cv2.destroyAllWindows()
+                results = model.predict(frame, imgsz=640, conf=0.5)
+
+                annotated = results[0].plot()
+
+                FRAME_WINDOW.image(annotated, channels="BGR")
+
+    if cap:
+        cap.release()
+
+# ============================
+# UPLOAD FOTO
+# ============================
+elif mode == "Upload Foto":
+    uploaded = st.file_uploader("Upload foto", type=["jpg", "jpeg", "png"])
+
+    if uploaded:
+        temp = tempfile.NamedTemporaryFile(delete=False)
+        temp.write(uploaded.read())
+        temp_path = temp.name
+
+        img = cv2.imread(temp_path)
+
+        results = model.predict(img, imgsz=640, conf=0.5)
+
+        annotated = results[0].plot()
+
+        st.image(annotated, channels="BGR", caption="Hasil Deteksi")
