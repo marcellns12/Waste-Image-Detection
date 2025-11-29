@@ -1,152 +1,132 @@
 import streamlit as st
 import cv2
 import numpy as np
-import tempfile
+import gdown
 import os
-from inference_sdk import InferenceHTTPClient
+from ultralytics import YOLO
 
 # ==================================================
 # 1. KONFIGURASI HALAMAN
 # ==================================================
-st.set_page_config(page_title="♻️ Waste Detection Fixed", layout="centered")
+st.set_page_config(page_title="♻️ Waste Detection (Drive Model)", layout="centered")
 
-# CSS agar tampilan lebih rapi
-st.markdown("""
-    <style>
-    .stButton>button { width: 100%; }
-    </style>
-    """, unsafe_allow_html=True)
+# ID File Google Drive Kamu
+# Link asli: https://drive.google.com/file/d/1DSp9TnRA_twScvL-Ds84vrMO9iYOPfid/view
+DRIVE_FILE_ID = '1DSp9TnRA_twScvL-Ds84vrMO9iYOPfid'
+MODEL_FILENAME = 'waste_model.pt'
 
 # ==================================================
-# 2. KONFIGURASI API (Ganti API Key jika perlu)
+# 2. FUNGSI DOWNLOAD & LOAD MODEL
 # ==================================================
-API_KEY = "ItgMPolGq0yMOI4nhLpe"
-MODEL_ID = "waste-project-pgzut/3"
+@st.cache_resource
+def load_model():
+    """
+    Mendownload model dari Google Drive jika belum ada, lalu me-load ke memori.
+    Menggunakan cache agar tidak download ulang setiap refresh.
+    """
+    # 1. Cek apakah file model sudah ada
+    if not os.path.exists(MODEL_FILENAME):
+        with st.spinner(f"Sedang mendownload model dari Google Drive... (Harap tunggu)"):
+            try:
+                # URL download gdown
+                url = f'https://drive.google.com/uc?id={DRIVE_FILE_ID}'
+                gdown.download(url, MODEL_FILENAME, quiet=False)
+                st.success("Download model berhasil!")
+            except Exception as e:
+                st.error(f"Gagal mendownload model: {e}")
+                return None
 
-# Inisialisasi Client
-CLIENT = InferenceHTTPClient(
-    api_url="https://detect.roboflow.com",
-    api_key=API_KEY
-)
-
-# ==================================================
-# 3. SETTING SENSITIVITAS (PENTING!)
-# ==================================================
-st.sidebar.header("⚙️ Pengaturan Deteksi")
-st.sidebar.info("Jika hasil deteksi salah (selalu B3), naikkan nilai ini.")
-
-# Slider untuk mengatur 'Confidence Threshold'
-# Default 0.4 (40%). Objek dengan keyakinan di bawah ini akan diabaikan.
-CONFIDENCE_THRESHOLD = st.sidebar.slider("Confidence Threshold (Keyakinan)", 0.0, 1.0, 0.40, 0.05)
-
-# ==================================================
-# 4. FUNGSI LOGIKA UTAMA
-# ==================================================
-def draw_predictions(image, predictions, threshold):
-    """Menggambar kotak HANYA jika confidence > threshold"""
-    if not predictions or 'predictions' not in predictions:
-        return image, 0
-
-    count = 0
-    for box in predictions['predictions']:
-        conf = box['confidence']
-        
-        # --- FILTER PENTING ---
-        # Jika keyakinan AI di bawah settingan slider, lewati (jangan gambar)
-        if conf < threshold:
-            continue
-            
-        count += 1
-        x, y, w, h = box['x'], box['y'], box['width'], box['height']
-        label = box['class']
-
-        # Koordinat
-        x1 = int(x - w / 2)
-        y1 = int(y - h / 2)
-        x2 = int(x + w / 2)
-        y2 = int(y + h / 2)
-
-        # Warna Kotak (Hijau Stabilo)
-        color = (0, 255, 0)
-
-        # Gambar Kotak
-        cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
-
-        # Label Background
-        text = f"{label} {conf:.0%}"
-        (t_w, t_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
-        cv2.rectangle(image, (x1, y1 - 25), (x1 + t_w, y1), color, -1)
-        
-        # Tulis Text
-        cv2.putText(image, text, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-    
-    return image, count
-
-def process_image(image_bytes, source_type="upload"):
-    """Fungsi tunggal untuk memproses gambar dari Upload maupun Kamera"""
-    temp_path = None
+    # 2. Load Model YOLO
     try:
-        # 1. Baca Gambar dari Bytes
+        model = YOLO(MODEL_FILENAME)
+        return model
+    except Exception as e:
+        st.error(f"Gagal memuat model YOLO: {e}")
+        return None
+
+# Load model di awal
+model = load_model()
+
+# ==================================================
+# 3. SETTING SENSITIVITAS
+# ==================================================
+st.sidebar.header("⚙️ Pengaturan")
+# Slider Confidence
+CONF_THRESHOLD = st.sidebar.slider("Confidence Threshold (Keyakinan)", 0.0, 1.0, 0.40, 0.05)
+
+# ==================================================
+# 4. FUNGSI DETEKSI (LOKAL)
+# ==================================================
+def process_image(image_bytes):
+    """
+    Menerima bytes gambar -> Prediksi Lokal (YOLO) -> Return Gambar Hasil
+    """
+    if model is None:
+        st.error("Model belum dimuat.")
+        return None, None
+
+    try:
+        # 1. Decode gambar ke OpenCV
         file_bytes = np.asarray(bytearray(image_bytes), dtype=np.uint8)
-        img_bgr = cv2.imdecode(file_bytes, 1) # Load as BGR
+        img_bgr = cv2.imdecode(file_bytes, 1)
 
-        # Validasi jika gambar rusak
         if img_bgr is None:
-            st.error("Gagal membaca file gambar.")
-            return
+            return None, None
 
-        # 2. Simpan Sementara (Wajib buat API Roboflow)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_file:
-            temp_path = temp_file.name
-            cv2.imwrite(temp_path, img_bgr)
-
-        # 3. Kirim ke API (Tampilkan Loading)
-        with st.spinner(f'Sedang menganalisis {source_type}...'):
-            result = CLIENT.infer(temp_path, model_id=MODEL_ID)
-
-        # 4. Gambar Kotak (Sesuai Slider Threshold)
-        annotated_img, count = draw_predictions(img_bgr, result, CONFIDENCE_THRESHOLD)
-
-        # 5. Tampilkan Hasil
-        st.success(f"Selesai! Terdeteksi: {count} objek (Diatas {CONFIDENCE_THRESHOLD*100:.0f}%)")
+        # 2. Prediksi menggunakan Model Lokal
+        # conf=... mengatur batas keyakinan agar tidak asal tebak
+        results = model.predict(img_bgr, conf=CONF_THRESHOLD)
         
-        # Convert BGR ke RGB untuk Streamlit
-        st.image(cv2.cvtColor(annotated_img, cv2.COLOR_BGR2RGB), use_column_width=True)
+        # 3. Ambil gambar hasil plotting (sudah ada kotaknya)
+        # results[0].plot() mengembalikan array BGR
+        annotated_img = results[0].plot()
+
+        # 4. Convert BGR ke RGB untuk Streamlit
+        final_img = cv2.cvtColor(annotated_img, cv2.COLOR_BGR2RGB)
         
-        # Debugging JSON (Opsional, taruh di expander biar rapi)
-        with st.expander("Lihat Data Mentah (JSON)"):
-            st.json(result)
+        # Hitung jumlah objek
+        count = len(results[0].boxes)
+        
+        # Ambil nama class yang terdeteksi untuk info
+        detected_classes = [model.names[int(c)] for c in results[0].boxes.cls]
+        
+        return final_img, detected_classes
 
     except Exception as e:
-        st.error(f"Terjadi Kesalahan: {e}")
-    finally:
-        # Bersihkan file sampah
-        if temp_path and os.path.exists(temp_path):
-            os.remove(temp_path)
+        st.error(f"Error proses deteksi: {e}")
+        return None, None
 
 # ==================================================
-# 5. UI UTAMA (TABS)
+# 5. UI UTAMA
 # ==================================================
-st.title("♻️ Waste Detection App")
-st.markdown("Aplikasi deteksi sampah menggunakan Roboflow API.")
+st.title("♻️ Waste Detection (Local Model)")
+st.markdown("Model didownload langsung dari Google Drive dan dijalankan di server ini.")
 
-tab1, tab2 = st.tabs(["📸 Ambil Foto (Kamera)", "🖼️ Upload File"])
+if model is None:
+    st.warning("⚠️ Model gagal dimuat. Pastikan File ID Google Drive benar dan bisa diakses publik.")
+    st.stop()
 
-# --- TAB 1: KAMERA (Diperbaiki) ---
+# Tabs
+tab1, tab2 = st.tabs(["📸 Kamera", "🖼️ Upload File"])
+
+# --- TAB 1: KAMERA ---
 with tab1:
-    st.write("Klik tombol di bawah untuk mengambil gambar.")
+    st.info("Ambil foto untuk mendeteksi.")
+    camera_file = st.camera_input("Kamera", key="cam")
     
-    # Kunci: Gunakan key unik agar tidak bentrok
-    camera_file = st.camera_input("Buka Kamera", key="camera_input")
-    
-    if camera_file is not None:
-        # Langsung proses
-        process_image(camera_file.getvalue(), source_type="Kamera")
+    if camera_file:
+        final_img, classes = process_image(camera_file.getvalue())
+        if final_img is not None:
+            st.success(f"Terdeteksi: {', '.join(set(classes))} ({len(classes)} objek)")
+            st.image(final_img, use_column_width=True)
 
 # --- TAB 2: UPLOAD ---
 with tab2:
-    uploaded_file = st.file_uploader("Pilih file gambar (JPG/PNG)", type=["jpg", "jpeg", "png"])
+    uploaded_file = st.file_uploader("Upload Foto", type=['jpg', 'png', 'jpeg'])
     
-    if uploaded_file is not None:
-        if st.button("🔍 Mulai Deteksi", key="btn_upload"):
-            process_image(uploaded_file.getvalue(), source_type="Upload")
+    if uploaded_file:
+        if st.button("🔍 Deteksi"):
+            final_img, classes = process_image(uploaded_file.read())
+            if final_img is not None:
+                st.success(f"Terdeteksi: {', '.join(set(classes))} ({len(classes)} objek)")
+                st.image(final_img, use_column_width=True)
