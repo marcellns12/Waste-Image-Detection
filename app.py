@@ -1,94 +1,96 @@
 import streamlit as st
 import cv2
-import av
+import numpy as np
 import supervision as sv
 from inference_sdk import InferenceHTTPClient
-from streamlit_webrtc import webrtc_streamer, RTCConfiguration
+from PIL import Image
 
 # ==================================================
-# 1. KONFIGURASI HALAMAN
+# 1. KONFIGURASI
 # ==================================================
-st.set_page_config(page_title="♻️ Waste Detection Live", layout="centered")
+st.set_page_config(page_title="♻️ Waste Detection Stabil", layout="centered")
 
 API_KEY = "ItgMPolGq0yMOI4nhLpe"
 MODEL_ID = "waste-project-pgzut/3"
 
-# ==================================================
-# 2. CONFIG STUN SERVER (SOLUSI VIDEO GAK MUNCUL)
-# ==================================================
-# Kita pakai banyak server agar kalau satu diblokir, ada cadangan.
-RTC_CONFIGURATION = RTCConfiguration(
-    {"iceServers": [
-        {"urls": ["stun:stun.l.google.com:19302"]},
-        {"urls": ["stun:stun1.l.google.com:19302"]},
-        {"urls": ["stun:stun2.l.google.com:19302"]},
-        {"urls": ["stun:stun3.l.google.com:19302"]},
-        {"urls": ["stun:stun4.l.google.com:19302"]},
-        {"urls": ["stun:global.stun.twilio.com:3478"]},
-    ]}
+# Inisialisasi Client
+CLIENT = InferenceHTTPClient(
+    api_url="https://detect.roboflow.com",
+    api_key=API_KEY
 )
 
+# Setup Annotator (Supaya kotak hasilnya rapi & bagus)
+box_annotator = sv.BoxAnnotator(thickness=3)
+label_annotator = sv.LabelAnnotator(text_scale=0.6, text_thickness=2, text_padding=10)
+
 # ==================================================
-# 3. CLASS LOGIKA DETEKSI
+# 2. FUNGSI LOGIKA (DENGAN RESIZE)
 # ==================================================
-class WasteDetector:
-    def __init__(self):
-        # Setup API
-        self.client = InferenceHTTPClient(
-            api_url="https://detect.roboflow.com",
-            api_key=API_KEY
-        )
-        # Setup Visual
-        self.box_annotator = sv.BoxAnnotator(thickness=2)
-        self.label_annotator = sv.LabelAnnotator(text_scale=0.5, text_thickness=1)
+def process_image(image_buffer):
+    try:
+        # 1. Baca gambar dari buffer kamera
+        file_bytes = np.asarray(bytearray(image_buffer.read()), dtype=np.uint8)
+        img_bgr = cv2.imdecode(file_bytes, 1)
+
+        # 2. [PENTING] Resize Gambar biar Internet Gak Berat
+        # Kita kecilkan ke lebar 640px. Kualitas tetap bagus, tapi size file turun 80%.
+        # Ini kunci agar tidak "Error Connection" ke API.
+        height, width = img_bgr.shape[:2]
+        new_width = 640
+        new_height = int((new_width / width) * height)
+        img_resized = cv2.resize(img_bgr, (new_width, new_height))
+
+        # 3. Kirim ke Roboflow API
+        with st.spinner("Mengidentifikasi jenis sampah..."):
+            result = CLIENT.infer(img_resized, model_id=MODEL_ID)
+
+        # 4. Konversi Hasil ke Format Supervision
+        detections = sv.Detections.from_inference(result)
+
+        # 5. Filter Sampah yang "Tidak Yakin" (Threshold)
+        # Hilangkan deteksi yang keyakinannya di bawah 40% (0.4) biar gak asal tebak B3
+        detections = detections[detections.confidence > 0.4]
+
+        # 6. Gambar Kotak & Label
+        annotated_image = box_annotator.annotate(scene=img_resized.copy(), detections=detections)
+        annotated_image = label_annotator.annotate(scene=annotated_image, detections=detections)
+
+        # 7. Return Hasil (Convert ke RGB buat Streamlit)
+        return cv2.cvtColor(annotated_image, cv2.COLOR_BGR2RGB), len(detections)
+
+    except Exception as e:
+        st.error(f"Terjadi kesalahan: {e}")
+        return None, 0
+
+# ==================================================
+# 3. TAMPILAN UTAMA
+# ==================================================
+st.title("♻️ Waste Detection (Mode Stabil)")
+st.markdown("Mode ini lebih cepat dan **anti-error** koneksi.")
+
+col1, col2 = st.columns(2)
+
+# --- KOLOM 1: KAMERA ---
+with col1:
+    st.write("📷 **Ambil Foto**")
+    # Camera Input (Native Streamlit) - Sangat Stabil
+    camera_file = st.camera_input("Klik tombol untuk mendeteksi", label_visibility="collapsed")
+
+# --- KOLOM 2: HASIL ---
+with col2:
+    st.write("🤖 **Hasil Deteksi**")
+    
+    if camera_file is not None:
+        # Proses gambar segera setelah dijepret
+        final_img, count = process_image(camera_file)
         
-        # Variabel
-        self.frame_count = 0
-        self.skip_frames = 15  # Deteksi tiap 15 frame (biar video lancar)
-        self.last_detections = None
-
-    def recv(self, frame):
-        # Convert ke gambar (NumPy)
-        img = frame.to_ndarray(format="bgr24")
-        
-        # --- LOGIKA HEMAT KUOTA & ANTI LAG ---
-        # Kirim ke API cuma sesekali, jangan setiap frame
-        if self.frame_count % self.skip_frames == 0:
-            try:
-                # Resize kecil dulu biar upload cepat (opsional)
-                # img_small = cv2.resize(img, (640, 640))
-                
-                # Kirim ke Roboflow
-                result = self.client.infer(img, model_id=MODEL_ID)
-                
-                # Simpan hasil deteksi
-                self.last_detections = sv.Detections.from_inference(result)
-            except Exception:
-                # Kalau internet error, jangan bikin video mati. Lanjut aja.
-                pass
-
-        # --- GAMBAR KOTAK (Persistent) ---
-        # Kotak akan tetap digambar meskipun kita lagi nge-skip frame
-        if self.last_detections:
-            try:
-                img = self.box_annotator.annotate(scene=img, detections=self.last_detections)
-                img = self.label_annotator.annotate(scene=img, detections=self.last_detections)
-            except Exception:
-                pass
-
-        self.frame_count += 1
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
-
-# ==================================================
-# 4. TAMPILAN UTAMA
-# ==================================================
-st.title("♻️ Live Waste Detection")
-st.info("Tunggu status berubah jadi 'Running'. Jika lama, refresh halaman.")
-
-webrtc_streamer(
-    key="waste-live",
-    video_processor_factory=WasteDetector,
-    rtc_configuration=RTC_CONFIGURATION,
-    media_stream_constraints={"video": True, "audio": False},
-    async_processing=True,
-)
+        if final_img is not None:
+            st.image(final_img, use_column_width=True)
+            
+            if count > 0:
+                st.success(f"Berhasil mendeteksi {count} objek!")
+            else:
+                st.warning("Tidak ada objek terdeteksi. Coba dekatkan kamera.")
+    else:
+        # Placeholder jika belum ada foto
+        st.info("Hasil akan muncul di sini setelah Anda mengambil foto.")
