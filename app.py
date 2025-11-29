@@ -1,137 +1,134 @@
 import streamlit as st
 import cv2
 import numpy as np
+import av
+import threading
 import tempfile
 import os
+from streamlit_webrtc import webrtc_streamer, RTCConfiguration
 from inference_sdk import InferenceHTTPClient
 
 # ==================================================
-# 1. KONFIGURASI HALAMAN & API
+# 1. KONFIGURASI API & SERVER
 # ==================================================
-st.set_page_config(page_title="♻️ Waste Detection API", layout="centered")
+st.set_page_config(page_title="♻️ Live Waste Detection", layout="wide")
 
-# Kunci API & Model ID Kamu
 API_KEY = "ItgMPolGq0yMOI4nhLpe"
 MODEL_ID = "waste-project-pgzut/3"
 
-# Inisialisasi Client Roboflow
+# Client Roboflow
 CLIENT = InferenceHTTPClient(
     api_url="https://detect.roboflow.com",
     api_key=API_KEY
 )
 
+# Konfigurasi STUN Server (Agar webcam stabil & tidak error connection)
+RTC_CONFIGURATION = RTCConfiguration(
+    {
+        "iceServers": [
+            {"urls": ["stun:stun.l.google.com:19302"]},
+            {"urls": ["stun:stun1.l.google.com:19302"]},
+        ]
+    }
+)
+
 # ==================================================
-# 2. FUNGSI GAMBAR KOTAK (VISUALISASI)
+# 2. LOGIKA PEMROSESAN VIDEO (CLASS)
 # ==================================================
-def draw_predictions(image, predictions):
-    """
-    Menggambar bounding box di atas gambar berdasarkan respon JSON Roboflow.
-    """
-    # Cek apakah ada prediksi valid
-    if not predictions or 'predictions' not in predictions:
+# Kita pakai Class agar bisa menyimpan 'state' (hasil deteksi terakhir)
+class VideoProcessor:
+    def __init__(self):
+        self.last_predictions = None # Menyimpan hasil deteksi terakhir
+        self.is_processing = False   # Menandakan apakah API sedang sibuk
+        self.lock = threading.Lock() # Pengaman thread
+
+    def api_worker(self, img_bgr):
+        """Fungsi ini berjalan di background thread untuk request API"""
+        temp_path = ""
+        try:
+            # Simpan temp file
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_file:
+                temp_path = temp_file.name
+                cv2.imwrite(temp_path, img_bgr)
+            
+            # Request ke Roboflow
+            result = CLIENT.infer(temp_path, model_id=MODEL_ID)
+            
+            # Update hasil deteksi terakhir secara aman
+            with self.lock:
+                self.last_predictions = result
+                
+        except Exception as e:
+            print(f"API Error: {e}")
+        finally:
+            self.is_processing = False
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def draw_box(self, image, predictions):
+        """Menggambar kotak berdasarkan data prediksi"""
+        if not predictions or 'predictions' not in predictions:
+            return image
+            
+        for box in predictions['predictions']:
+            x, y, w, h = box['x'], box['y'], box['width'], box['height']
+            label = box['class']
+            conf = box['confidence']
+
+            # Koordinat
+            x1 = int(x - w / 2)
+            y1 = int(y - h / 2)
+            x2 = int(x + w / 2)
+            y2 = int(y + h / 2)
+
+            # Gambar
+            color = (0, 255, 0)
+            cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
+            
+            text = f"{label} {conf:.1%}"
+            (t_w, t_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
+            cv2.rectangle(image, (x1, y1 - 25), (x1 + t_w, y1), color, -1)
+            cv2.putText(image, text, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+        
         return image
 
-    for box in predictions['predictions']:
-        # Ambil data koordinat
-        x, y, w, h = box['x'], box['y'], box['width'], box['height']
-        label = box['class']
-        conf = box['confidence']
-
-        # Hitung koordinat pojok kiri-atas (x1, y1) dan kanan-bawah (x2, y2)
-        x1 = int(x - w / 2)
-        y1 = int(y - h / 2)
-        x2 = int(x + w / 2)
-        y2 = int(y + h / 2)
-
-        # Warna (Hijau untuk kotak)
-        color = (0, 255, 0) 
-
-        # 1. Gambar Kotak
-        cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
-
-        # 2. Gambar Background Label (Hitam) di atas kotak
-        text = f"{label} ({conf:.1%})"
-        (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
-        cv2.rectangle(image, (x1, y1 - 25), (x1 + text_w, y1), color, -1)
-
-        # 3. Tulis Teks Label
-        cv2.putText(image, text, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-    
-    return image
-
-# ==================================================
-# 3. FUNGSI PROSES UTAMA
-# ==================================================
-def process_image(image_bytes):
-    """
-    Menerima bytes gambar -> Simpan Temp -> Kirim API -> Gambar Kotak -> Return RGB
-    """
-    temp_path = None
-    try:
-        # 1. Decode bytes ke OpenCV Image (BGR)
-        file_bytes = np.asarray(bytearray(image_bytes), dtype=np.uint8)
-        img_bgr = cv2.imdecode(file_bytes, 1)
-
-        # 2. Simpan ke file temporary (Wajib karena SDK butuh path file lokal)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_file:
-            temp_path = temp_file.name
-            cv2.imwrite(temp_path, img_bgr)
-
-        # 3. Kirim ke Roboflow API
-        with st.spinner('Sedang mengirim ke server Roboflow...'):
-            result = CLIENT.infer(temp_path, model_id=MODEL_ID)
+    def recv(self, frame):
+        """Fungsi utama yang dipanggil setiap frame video"""
+        img = frame.to_ndarray(format="bgr24")
         
-        # 4. Gambar hasil ke foto
-        annotated_bgr = draw_predictions(img_bgr, result)
+        # 1. Cek apakah thread API sedang kosong (tidak sibuk)
+        if not self.is_processing:
+            self.is_processing = True
+            # Jalankan request API di thread terpisah (Parallel)
+            # Agar video tidak nge-freeze menunggu internet
+            t = threading.Thread(target=self.api_worker, args=(img.copy(),))
+            t.start()
 
-        # 5. Convert ke RGB untuk Streamlit
-        final_rgb = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
-        return final_rgb, result
+        # 2. Gambar kotak menggunakan hasil prediksi TERAKHIR yang tersedia
+        with self.lock:
+            if self.last_predictions:
+                img = self.draw_box(img, self.last_predictions)
 
-    except Exception as e:
-        st.error(f"Error saat memproses gambar: {e}")
-        return None, None
-    finally:
-        # Hapus file sampah agar storage tidak penuh
-        if temp_path and os.path.exists(temp_path):
-            os.remove(temp_path)
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 # ==================================================
-# 4. UI STREAMLIT
+# 3. UI STREAMLIT
 # ==================================================
-st.title("♻️ Waste Detection (Roboflow Cloud)")
-st.markdown(f"Menggunakan Model ID: `{MODEL_ID}`")
+st.title("♻️ Realtime Waste Detection (API)")
+st.info("Arahkan benda ke kamera. Deteksi berjalan otomatis.")
 
-# Membuat Tab
-tab1, tab2 = st.tabs(["🖼️ Upload Foto", "📷 Ambil Foto (Webcam)"])
+# Menjalankan Webcam
+webrtc_streamer(
+    key="waste-realtime",
+    video_processor_factory=VideoProcessor, # Gunakan Class logic di atas
+    rtc_configuration=RTC_CONFIGURATION,
+    media_stream_constraints={"video": True, "audio": False},
+    async_processing=True,
+)
 
-# --- TAB 1: UPLOAD FOTO ---
-with tab1:
-    uploaded_file = st.file_uploader("Upload foto sampah (JPG/PNG)", type=["jpg", "png", "jpeg"])
-    
-    if uploaded_file:
-        if st.button("🔍 Deteksi File Ini"):
-            # Panggil fungsi process_image
-            final_img, json_res = process_image(uploaded_file.read())
-            
-            if final_img is not None:
-                st.image(final_img, caption="Hasil Deteksi", use_column_width=True)
-                # Opsional: Tampilkan data mentah JSON
-                with st.expander("Lihat Data JSON"):
-                    st.json(json_res)
-
-# --- TAB 2: WEBCAM SNAPSHOT ---
-with tab2:
-    st.info("Klik tombol 'Take Photo' di bawah untuk mengambil gambar.")
-    
-    # st.camera_input lebih stabil daripada streaming video untuk penggunaan API
-    camera_file = st.camera_input("Kamera")
-    
-    if camera_file is not None:
-        # Panggil fungsi process_image langsung saat foto diambil
-        final_img, json_res = process_image(camera_file.read())
-        
-        if final_img is not None:
-            st.image(final_img, caption="Hasil Deteksi Kamera", use_column_width=True)
-            with st.expander("Lihat Data JSON"):
-                st.json(json_res)
+st.markdown("""
+---
+**Catatan:**
+- Karena menggunakan **API Cloud**, mungkin ada sedikit *delay* antara gerakan benda dan kotak hijau (tergantung kecepatan internet).
+- Video akan tetap lancar, tapi kotak hijaunya akan 'menyusul' gerakan benda.
+""")
