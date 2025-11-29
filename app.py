@@ -11,7 +11,7 @@ st.set_page_config(page_title="Waste Detection", layout="wide")
 # GOOGLE DRIVE MODEL DOWNLOAD
 # ----------------------------------------------------
 DRIVE_URL = "https://drive.google.com/file/d/1DSp9TnRA_twScvL-Ds84vrMO9iYOPfid/view?usp=sharing"
-MODEL_PATH = "best_saved.pt"
+MODEL_PATH = "waste_model.pt"
 
 
 @st.cache_resource
